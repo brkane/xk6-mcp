@@ -85,6 +85,7 @@ type Client struct {
 	session *mcp.ClientSession
 
 	k6_state *lib.State
+	ctx      context.Context
 }
 
 // Exports defines the JavaScript-accessible functions
@@ -113,9 +114,9 @@ func (m *MCPInstance) newStdioClient(c sobek.ConstructorCall, rt *sobek.Runtime)
 		cmd.Stderr = os.Stderr
 	}
 
-  transport := &mcp.CommandTransport{
-    Command: cmd,
-  }
+	transport := &mcp.CommandTransport{
+		Command: cmd,
+	}
 
 	clientObj := m.connect(rt, transport, false)
 	var client *Client
@@ -126,6 +127,7 @@ func (m *MCPInstance) newStdioClient(c sobek.ConstructorCall, rt *sobek.Runtime)
 	return rt.ToValue(&Client{
 		session:  client.session,
 		k6_state: m.vu.State(),
+		ctx:      m.vu.Context(),
 	}).ToObject(rt)
 }
 
@@ -135,10 +137,10 @@ func (m *MCPInstance) newSSEClient(c sobek.ConstructorCall, rt *sobek.Runtime) *
 		common.Throw(rt, fmt.Errorf("invalid config: %w", err))
 	}
 
-  transport := &mcp.SSEClientTransport{
-    Endpoint: cfg.BaseURL,
-    HTTPClient: m.newk6HTTPClient(),
-  }
+	transport := &mcp.SSEClientTransport{
+		Endpoint:   cfg.BaseURL,
+		HTTPClient: m.newk6HTTPClient(),
+	}
 
 	clientObj := m.connect(rt, transport, true)
 	var client *Client
@@ -149,6 +151,7 @@ func (m *MCPInstance) newSSEClient(c sobek.ConstructorCall, rt *sobek.Runtime) *
 	return rt.ToValue(&Client{
 		session:  client.session,
 		k6_state: m.vu.State(),
+		ctx:      m.vu.Context(),
 	}).ToObject(rt)
 }
 
@@ -158,10 +161,10 @@ func (m *MCPInstance) newStreamableHTTPClient(c sobek.ConstructorCall, rt *sobek
 		common.Throw(rt, fmt.Errorf("invalid config: %w", err))
 	}
 
-  transport := &mcp.StreamableClientTransport{
-    Endpoint: cfg.BaseURL,
-    HTTPClient: m.newk6HTTPClient(),
-  }
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:   cfg.BaseURL,
+		HTTPClient: m.newk6HTTPClient(),
+	}
 
 	clientObj := m.connect(rt, transport, false)
 	var client *Client
@@ -172,6 +175,7 @@ func (m *MCPInstance) newStreamableHTTPClient(c sobek.ConstructorCall, rt *sobek
 	return rt.ToValue(&Client{
 		session:  client.session,
 		k6_state: m.vu.State(),
+		ctx:      m.vu.Context(),
 	}).ToObject(rt)
 }
 
@@ -195,18 +199,8 @@ func (m *MCPInstance) newk6HTTPClient() *http.Client {
 }
 
 func (m *MCPInstance) connect(rt *sobek.Runtime, transport mcp.Transport, isSSE bool) *sobek.Object {
-	var ctx context.Context
-	var cancel context.CancelFunc
-	if isSSE {
-		ctx = context.Background()
-		cancel = func() {}
-	} else {
-		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
-	}
-	defer cancel()
-
-  client := mcp.NewClient(&mcp.Implementation{Name: "k6", Version: "1.0.0"}, nil)
-	session, err := client.Connect(ctx, transport, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "k6", Version: "1.0.0"}, nil)
+	session, err := client.Connect(m.vu.Context(), transport, nil)
 	if err != nil {
 		common.Throw(rt, fmt.Errorf("connection error: %w", err))
 	}
@@ -215,12 +209,12 @@ func (m *MCPInstance) connect(rt *sobek.Runtime, transport mcp.Transport, isSSE 
 }
 
 func (c *Client) Ping() bool {
-	err := c.session.Ping(context.Background(), &mcp.PingParams{})
+	err := c.session.Ping(c.ctx, &mcp.PingParams{})
 	return err == nil
 }
 
 func (c *Client) ListTools(r mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
-	return c.session.ListTools(context.Background(), &r)
+	return c.session.ListTools(c.ctx, &r)
 }
 
 type ListAllToolsParams struct {
@@ -246,7 +240,7 @@ func (c *Client) ListAllTools(r ListAllToolsParams) (*ListAllToolsResult, error)
 			params.Cursor = cursor
 		}
 		var result *mcp.ListToolsResult
-		result, err = c.session.ListTools(context.Background(), params)
+		result, err = c.session.ListTools(c.ctx, params)
 		if err != nil {
 			break
 		}
@@ -275,35 +269,35 @@ func (c *Client) ListAllTools(r ListAllToolsParams) (*ListAllToolsResult, error)
 
 func (c *Client) CallTool(r mcp.CallToolParams) (*mcp.CallToolResult, error) {
 	start := time.Now()
-	result, err := c.session.CallTool(context.Background(), &r)
+	result, err := c.session.CallTool(c.ctx, &r)
 	pushRequestMetrics(c, "CallTool", time.Since(start), err)
 	return result, err
 }
 
 func (c *Client) ListResources(r mcp.ListResourcesParams) (*mcp.ListResourcesResult, error) {
 	start := time.Now()
-	res, err := c.session.ListResources(context.Background(), &r)
+	res, err := c.session.ListResources(c.ctx, &r)
 	pushRequestMetrics(c, "ListResources", time.Since(start), err)
 	return res, err
 }
 
 func (c *Client) ReadResource(r mcp.ReadResourceParams) (*mcp.ReadResourceResult, error) {
 	start := time.Now()
-	res, err := c.session.ReadResource(context.Background(), &r)
+	res, err := c.session.ReadResource(c.ctx, &r)
 	pushRequestMetrics(c, "ReadResource", time.Since(start), err)
 	return res, err
 }
 
 func (c *Client) ListPrompts(r mcp.ListPromptsParams) (*mcp.ListPromptsResult, error) {
 	start := time.Now()
-	res, err := c.session.ListPrompts(context.Background(), &r)
+	res, err := c.session.ListPrompts(c.ctx, &r)
 	pushRequestMetrics(c, "ListPrompts", time.Since(start), err)
 	return res, err
 }
 
 func (c *Client) GetPrompt(r mcp.GetPromptParams) (*mcp.GetPromptResult, error) {
 	start := time.Now()
-	res, err := c.session.GetPrompt(context.Background(), &r)
+	res, err := c.session.GetPrompt(c.ctx, &r)
 	pushRequestMetrics(c, "GetPrompt", time.Since(start), err)
 	return res, err
 }
@@ -331,7 +325,7 @@ func (c *Client) ListAllResources(r ListAllResourcesParams) (*ListAllResourcesRe
 			params.Cursor = cursor
 		}
 		var result *mcp.ListResourcesResult
-		result, err = c.session.ListResources(context.Background(), params)
+		result, err = c.session.ListResources(c.ctx, params)
 		if err != nil {
 			break
 		}
@@ -381,7 +375,7 @@ func (c *Client) ListAllPrompts(r ListAllPromptsParams) (*ListAllPromptsResult, 
 			params.Cursor = cursor
 		}
 		var result *mcp.ListPromptsResult
-		result, err = c.session.ListPrompts(context.Background(), params)
+		result, err = c.session.ListPrompts(c.ctx, params)
 		if err != nil {
 			break
 		}
@@ -409,7 +403,7 @@ func (c *Client) ListAllPrompts(r ListAllPromptsParams) (*ListAllPromptsResult, 
 }
 
 func pushRequestMetrics(client *Client, method string, duration time.Duration, err error) {
-	metrics.PushIfNotDone(context.Background(), client.k6_state.Samples, metrics.Sample{
+	metrics.PushIfNotDone(client.ctx, client.k6_state.Samples, metrics.Sample{
 		TimeSeries: metrics.TimeSeries{
 			Metric: mcp_metrics.RequestDuration,
 			Tags: client.k6_state.Tags.GetCurrentValues().Tags.With(
@@ -420,7 +414,7 @@ func pushRequestMetrics(client *Client, method string, duration time.Duration, e
 		Value: float64(duration) / float64(time.Millisecond),
 	})
 
-	metrics.PushIfNotDone(context.Background(), client.k6_state.Samples, metrics.Sample{
+	metrics.PushIfNotDone(client.ctx, client.k6_state.Samples, metrics.Sample{
 		TimeSeries: metrics.TimeSeries{
 			Metric: mcp_metrics.RequestCount,
 			Tags: client.k6_state.Tags.GetCurrentValues().Tags.With(
@@ -432,7 +426,7 @@ func pushRequestMetrics(client *Client, method string, duration time.Duration, e
 	})
 
 	if err != nil {
-		metrics.PushIfNotDone(context.Background(), client.k6_state.Samples, metrics.Sample{
+		metrics.PushIfNotDone(client.ctx, client.k6_state.Samples, metrics.Sample{
 			TimeSeries: metrics.TimeSeries{
 				Metric: mcp_metrics.RequestErrors,
 				Tags: client.k6_state.Tags.GetCurrentValues().Tags.With(
