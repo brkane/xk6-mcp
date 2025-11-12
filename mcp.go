@@ -141,6 +141,7 @@ func (m *MCPInstance) newSSEClient(c sobek.ConstructorCall, rt *sobek.Runtime) *
 		Endpoint:   cfg.BaseURL,
 		HTTPClient: m.newk6HTTPClient(),
 	}
+	transport.HTTPClient.Timeout = cfg.Timeout
 
 	clientObj := m.connect(rt, transport, true)
 	var client *Client
@@ -165,6 +166,7 @@ func (m *MCPInstance) newStreamableHTTPClient(c sobek.ConstructorCall, rt *sobek
 		Endpoint:   cfg.BaseURL,
 		HTTPClient: m.newk6HTTPClient(),
 	}
+	transport.HTTPClient.Timeout = cfg.Timeout
 
 	clientObj := m.connect(rt, transport, false)
 	var client *Client
