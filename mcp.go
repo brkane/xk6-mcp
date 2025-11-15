@@ -16,6 +16,7 @@ import (
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/lib"
 	"go.k6.io/k6/metrics"
+	"golang.org/x/oauth2"
 )
 
 func init() {
@@ -67,6 +68,11 @@ type mcpMetrics struct {
 	TagsAndMeta *metrics.TagsAndMeta
 }
 
+// AuthConfig represents auth configuration for the MCP client
+type AuthConfig struct {
+	BearerToken string
+}
+
 // ClientConfig represents the configuration for the MCP client
 type ClientConfig struct {
 	// Stdio
@@ -78,6 +84,7 @@ type ClientConfig struct {
 	// SSE and Streamable HTTP
 	BaseURL string
 	Timeout time.Duration
+	Auth    AuthConfig
 }
 
 // Client wraps an MCP client session
@@ -139,9 +146,8 @@ func (m *MCPInstance) newSSEClient(c sobek.ConstructorCall, rt *sobek.Runtime) *
 
 	transport := &mcp.SSEClientTransport{
 		Endpoint:   cfg.BaseURL,
-		HTTPClient: m.newk6HTTPClient(),
+		HTTPClient: m.newk6HTTPClient(cfg),
 	}
-	transport.HTTPClient.Timeout = cfg.Timeout
 
 	clientObj := m.connect(rt, transport, true)
 	var client *Client
@@ -164,9 +170,8 @@ func (m *MCPInstance) newStreamableHTTPClient(c sobek.ConstructorCall, rt *sobek
 
 	transport := &mcp.StreamableClientTransport{
 		Endpoint:   cfg.BaseURL,
-		HTTPClient: m.newk6HTTPClient(),
+		HTTPClient: m.newk6HTTPClient(cfg),
 	}
-	transport.HTTPClient.Timeout = cfg.Timeout
 
 	clientObj := m.connect(rt, transport, false)
 	var client *Client
@@ -181,7 +186,7 @@ func (m *MCPInstance) newStreamableHTTPClient(c sobek.ConstructorCall, rt *sobek
 	}).ToObject(rt)
 }
 
-func (m *MCPInstance) newk6HTTPClient() *http.Client {
+func (m *MCPInstance) newk6HTTPClient(cfg ClientConfig) *http.Client {
 	var tlsConfig *tls.Config
 	if m.vu.State().TLSConfig != nil {
 		tlsConfig = m.vu.State().TLSConfig.Clone()
@@ -195,6 +200,20 @@ func (m *MCPInstance) newk6HTTPClient() *http.Client {
 			TLSClientConfig:   tlsConfig,
 			DisableKeepAlives: m.vu.State().Options.NoConnectionReuse.ValueOrZero() || m.vu.State().Options.NoVUConnectionReuse.ValueOrZero(),
 		},
+		Timeout: cfg.Timeout,
+	}
+
+	if cfg.Auth.BearerToken != "" {
+		ctx := context.Background()
+
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
+
+		token := oauth2.Token{
+			AccessToken: cfg.Auth.BearerToken,
+		}
+		tokenSource := oauth2.StaticTokenSource(&token)
+
+		return oauth2.NewClient(ctx, tokenSource)
 	}
 
 	return httpClient
