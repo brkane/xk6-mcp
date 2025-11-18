@@ -19,6 +19,12 @@ import (
 	"golang.org/x/oauth2"
 )
 
+const (
+  requestDurationName = "mcp_request_duration"
+  requestCountName    = "mcp_request_count"
+  requestErrorsName   = "mcp_request_errors"
+)
+
 func init() {
 	modules.Register("k6/x/mcp", new(MCP))
 }
@@ -34,9 +40,9 @@ func (*MCP) NewModuleInstance(vu modules.VU) modules.Instance {
 
 	logger := env.Logger.WithField("component", "xk6-mcp")
 
-	mcp_request_duration, _ := env.Registry.NewMetric("mcp_request_duration", metrics.Trend)
-	mcp_request_count, _ := env.Registry.NewMetric("mcp_request_count", metrics.Counter)
-	mcp_request_errors, _ := env.Registry.NewMetric("mcp_request_errors", metrics.Counter)
+	mcp_request_duration, _ := env.Registry.NewMetric(requestDurationName, metrics.Trend)
+	mcp_request_count, _ := env.Registry.NewMetric(requestCountName, metrics.Counter)
+	mcp_request_errors, _ := env.Registry.NewMetric(requestErrorsName, metrics.Counter)
 
 	mcp_metrics = &mcpMetrics{
 		RequestDuration: mcp_request_duration,
