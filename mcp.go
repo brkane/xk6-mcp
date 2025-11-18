@@ -20,9 +20,15 @@ import (
 )
 
 const (
-  requestDurationName = "mcp_request_duration"
-  requestCountName    = "mcp_request_count"
-  requestErrorsName   = "mcp_request_errors"
+	requestDurationName     = "mcp_request_duration"
+	requestCountName        = "mcp_request_count"
+	requestErrorsName       = "mcp_request_errors"
+	listToolsMethodName     = "tools/list"
+	callToolMethodName      = "tools/call"
+	listResourcesMethodName = "resources/list"
+	readResourceMethodName  = "resources/read"
+	listPromptsMethodName   = "prompts/list"
+	getPromptMethodName     = "prompts/get"
 )
 
 func init() {
@@ -241,7 +247,10 @@ func (c *Client) Ping() bool {
 }
 
 func (c *Client) ListTools(r mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
-	return c.session.ListTools(c.ctx, &r)
+	start := time.Now()
+	result, err := c.session.ListTools(c.ctx, &r)
+	pushRequestMetrics(c, listToolsMethodName, time.Since(start), err)
+	return result, err
 }
 
 type ListAllToolsParams struct {
@@ -259,7 +268,6 @@ func (c *Client) ListAllTools(r ListAllToolsParams) (*ListAllToolsResult, error)
 
 	var allTools []mcp.Tool
 	cursor := ""
-	start := time.Now()
 	var err error
 	for {
 		params := &mcp.ListToolsParams{Meta: r.Meta}
@@ -267,7 +275,9 @@ func (c *Client) ListAllTools(r ListAllToolsParams) (*ListAllToolsResult, error)
 			params.Cursor = cursor
 		}
 		var result *mcp.ListToolsResult
+		start := time.Now()
 		result, err = c.session.ListTools(c.ctx, params)
+		pushRequestMetrics(c, listToolsMethodName, time.Since(start), err)
 		if err != nil {
 			break
 		}
@@ -284,7 +294,6 @@ func (c *Client) ListAllTools(r ListAllToolsParams) (*ListAllToolsResult, error)
 		cursor = result.NextCursor
 	}
 
-	pushRequestMetrics(c, "ListAllTools", time.Since(start), err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tools: %w", err)
 	}
@@ -297,35 +306,35 @@ func (c *Client) ListAllTools(r ListAllToolsParams) (*ListAllToolsResult, error)
 func (c *Client) CallTool(r mcp.CallToolParams) (*mcp.CallToolResult, error) {
 	start := time.Now()
 	result, err := c.session.CallTool(c.ctx, &r)
-	pushRequestMetrics(c, "CallTool", time.Since(start), err)
+	pushRequestMetrics(c, callToolMethodName, time.Since(start), err)
 	return result, err
 }
 
 func (c *Client) ListResources(r mcp.ListResourcesParams) (*mcp.ListResourcesResult, error) {
 	start := time.Now()
 	res, err := c.session.ListResources(c.ctx, &r)
-	pushRequestMetrics(c, "ListResources", time.Since(start), err)
+	pushRequestMetrics(c, listResourcesMethodName, time.Since(start), err)
 	return res, err
 }
 
 func (c *Client) ReadResource(r mcp.ReadResourceParams) (*mcp.ReadResourceResult, error) {
 	start := time.Now()
 	res, err := c.session.ReadResource(c.ctx, &r)
-	pushRequestMetrics(c, "ReadResource", time.Since(start), err)
+	pushRequestMetrics(c, readResourceMethodName, time.Since(start), err)
 	return res, err
 }
 
 func (c *Client) ListPrompts(r mcp.ListPromptsParams) (*mcp.ListPromptsResult, error) {
 	start := time.Now()
 	res, err := c.session.ListPrompts(c.ctx, &r)
-	pushRequestMetrics(c, "ListPrompts", time.Since(start), err)
+	pushRequestMetrics(c, listPromptsMethodName, time.Since(start), err)
 	return res, err
 }
 
 func (c *Client) GetPrompt(r mcp.GetPromptParams) (*mcp.GetPromptResult, error) {
 	start := time.Now()
 	res, err := c.session.GetPrompt(c.ctx, &r)
-	pushRequestMetrics(c, "GetPrompt", time.Since(start), err)
+	pushRequestMetrics(c, getPromptMethodName, time.Since(start), err)
 	return res, err
 }
 
@@ -344,7 +353,6 @@ func (c *Client) ListAllResources(r ListAllResourcesParams) (*ListAllResourcesRe
 
 	var allResources []mcp.Resource
 	cursor := ""
-	start := time.Now()
 	var err error
 	for {
 		params := &mcp.ListResourcesParams{Meta: r.Meta}
@@ -352,7 +360,9 @@ func (c *Client) ListAllResources(r ListAllResourcesParams) (*ListAllResourcesRe
 			params.Cursor = cursor
 		}
 		var result *mcp.ListResourcesResult
+		start := time.Now()
 		result, err = c.session.ListResources(c.ctx, params)
+		pushRequestMetrics(c, listResourcesMethodName, time.Since(start), err)
 		if err != nil {
 			break
 		}
@@ -369,7 +379,6 @@ func (c *Client) ListAllResources(r ListAllResourcesParams) (*ListAllResourcesRe
 		cursor = result.NextCursor
 	}
 
-	pushRequestMetrics(c, "ListAllResources", time.Since(start), err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list resources: %w", err)
 	}
@@ -394,7 +403,6 @@ func (c *Client) ListAllPrompts(r ListAllPromptsParams) (*ListAllPromptsResult, 
 
 	var allPrompts []mcp.Prompt
 	cursor := ""
-	start := time.Now()
 	var err error
 	for {
 		params := &mcp.ListPromptsParams{Meta: r.Meta}
@@ -402,7 +410,9 @@ func (c *Client) ListAllPrompts(r ListAllPromptsParams) (*ListAllPromptsResult, 
 			params.Cursor = cursor
 		}
 		var result *mcp.ListPromptsResult
+		start := time.Now()
 		result, err = c.session.ListPrompts(c.ctx, params)
+		pushRequestMetrics(c, listPromptsMethodName, time.Since(start), err)
 		if err != nil {
 			break
 		}
@@ -419,7 +429,6 @@ func (c *Client) ListAllPrompts(r ListAllPromptsParams) (*ListAllPromptsResult, 
 		cursor = result.NextCursor
 	}
 
-	pushRequestMetrics(c, "ListAllPrompts", time.Since(start), err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list prompts: %w", err)
 	}
@@ -430,12 +439,14 @@ func (c *Client) ListAllPrompts(r ListAllPromptsParams) (*ListAllPromptsResult, 
 }
 
 func pushRequestMetrics(client *Client, method string, duration time.Duration, err error) {
+	tags := client.k6_state.Tags.GetCurrentValues().Tags.With(
+		"method", method,
+	)
+
 	metrics.PushIfNotDone(client.ctx, client.k6_state.Samples, metrics.Sample{
 		TimeSeries: metrics.TimeSeries{
 			Metric: mcp_metrics.RequestDuration,
-			Tags: client.k6_state.Tags.GetCurrentValues().Tags.With(
-				"method", method,
-			),
+			Tags:   tags,
 		},
 		Time:  time.Now(),
 		Value: float64(duration) / float64(time.Millisecond),
@@ -444,9 +455,7 @@ func pushRequestMetrics(client *Client, method string, duration time.Duration, e
 	metrics.PushIfNotDone(client.ctx, client.k6_state.Samples, metrics.Sample{
 		TimeSeries: metrics.TimeSeries{
 			Metric: mcp_metrics.RequestCount,
-			Tags: client.k6_state.Tags.GetCurrentValues().Tags.With(
-				"method", method,
-			),
+			Tags:   tags,
 		},
 		Time:  time.Now(),
 		Value: 1,
@@ -456,9 +465,7 @@ func pushRequestMetrics(client *Client, method string, duration time.Duration, e
 		metrics.PushIfNotDone(client.ctx, client.k6_state.Samples, metrics.Sample{
 			TimeSeries: metrics.TimeSeries{
 				Metric: mcp_metrics.RequestErrors,
-				Tags: client.k6_state.Tags.GetCurrentValues().Tags.With(
-					"method", method,
-				),
+				Tags:   tags,
 			},
 			Time:  time.Now(),
 			Value: 1,
