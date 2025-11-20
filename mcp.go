@@ -46,7 +46,7 @@ func (*MCP) NewModuleInstance(vu modules.VU) modules.Instance {
 
 	logger := env.Logger.WithField("component", "xk6-mcp")
 
-	mcp_request_duration, _ := env.Registry.NewMetric(requestDurationName, metrics.Trend)
+	mcp_request_duration, _ := env.Registry.NewMetric(requestDurationName, metrics.Trend, metrics.Time)
 	mcp_request_count, _ := env.Registry.NewMetric(requestCountName, metrics.Counter)
 	mcp_request_errors, _ := env.Registry.NewMetric(requestErrorsName, metrics.Counter)
 
