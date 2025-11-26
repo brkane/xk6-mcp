@@ -2,239 +2,158 @@ package mcp
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"net/http"
-	"os"
-	"os/exec"
 	"time"
 
-	"github.com/grafana/sobek"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/sirupsen/logrus"
-	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
-	"go.k6.io/k6/lib"
 	"go.k6.io/k6/metrics"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	oteltrace "go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/oauth2"
 )
 
+func init() {
+	modules.Register("k6/x/mcp", New())
+}
+
 const (
-	requestDurationName = "mcp_request_duration"
-	requestCountName    = "mcp_request_count"
-	requestErrorsName   = "mcp_request_errors"
+	tracerScope       = "github.com/grafana/xk6-mcp"
+	connectSpanName   = "Connect"
+	listToolsSpanName = "ListTools"
+	callToolSpanName  = "CallTool"
 
-	listToolsMethodName     = "tools/list"
-	callToolMethodName      = "tools/call"
-	listResourcesMethodName = "resources/list"
-	readResourceMethodName  = "resources/read"
-	listPromptsMethodName   = "prompts/list"
-	getPromptMethodName     = "prompts/get"
+	requestDurationMetricName = "mcp_request_duration"
+	requestCountMetricName    = "mcp_request_count"
+	requestErrorsMetricName   = "mcp_request_errors"
 
-	tracerScope           = "github.com/grafana/xk6-mcp"
-	tracerName            = "xk6-mcp"
-	connectSpanName       = "Connect"
-	listToolsSpanName     = "ListTools"
-	callToolSpanName      = "CallTool"
-	listResourcesSpanName = "ListResources"
-	readResourceSpanName  = "ReadResource"
-	listPromptsSpanName   = "ListPrompts"
-	getPromptSpanName     = "GetPrompt"
+	connectMethodName   = "connect"
+	listToolsMethodName = "tools/list"
+	callToolMethodName  = "tools/call"
 )
 
-func init() {
-	modules.Register("k6/x/mcp", new(MCP))
-}
-
-// MCP is the root module struct
-type MCP struct{}
-
-var mcp_metrics *mcpMetrics
-
-// NewModuleInstance initializes a new module instance
-func (*MCP) NewModuleInstance(vu modules.VU) modules.Instance {
-	env := vu.InitEnv()
-
-	logger := env.Logger.WithField("component", "xk6-mcp")
-
-	mcp_request_duration := env.Registry.MustNewMetric(requestDurationName, metrics.Trend, metrics.Time)
-	mcp_request_count := env.Registry.MustNewMetric(requestCountName, metrics.Counter)
-	mcp_request_errors := env.Registry.MustNewMetric(requestErrorsName, metrics.Counter)
-
-	mcp_metrics = &mcpMetrics{
-		RequestDuration: mcp_request_duration,
-		RequestCount:    mcp_request_count,
-		RequestErrors:   mcp_request_errors,
+type (
+	// MCP is the instance of the JS module
+	MCP struct {
+		vu      modules.VU
+		session *mcp.ClientSession
+		tracer  trace.Tracer
+		metrics *mcpMetrics
 	}
 
-	mcp_metrics.TagsAndMeta = &metrics.TagsAndMeta{
-		Tags: env.Registry.RootTagSet(),
+	// RootModule is the global module instance that will create module instances for each VU.
+	RootModule struct{}
+
+	Module struct {
+		*MCP
+		exports modules.Exports
 	}
 
-	return &MCPInstance{
-		vu:     vu,
-		logger: logger,
+	AuthConfig struct {
+		BearerToken string
 	}
+
+	Config struct {
+		BaseURL string
+		//Timeout        time.Duration
+		Auth           AuthConfig
+		TracingEnabled bool
+	}
+
+	mcpMetrics struct {
+		RequestDuration *metrics.Metric
+		RequestCount    *metrics.Metric
+		RequestErrors   *metrics.Metric
+
+		TagsAndMeta *metrics.TagsAndMeta
+	}
+)
+
+var (
+	_ modules.Instance = &Module{}
+	_ modules.Module   = &RootModule{}
+)
+
+// New returns a pointer to a new RootModule instance.
+func New() *RootModule {
+	return &RootModule{}
 }
 
-// MCPInstance represents an instance of the MCP module
-type MCPInstance struct {
-	vu     modules.VU
-	logger logrus.FieldLogger
-}
-
-type mcpMetrics struct {
-	RequestDuration *metrics.Metric
-	RequestCount    *metrics.Metric
-	RequestErrors   *metrics.Metric
-
-	TagsAndMeta *metrics.TagsAndMeta
-}
-
-// AuthConfig represents auth configuration for the MCP client
-type AuthConfig struct {
-	BearerToken string
-}
-
-// ClientConfig represents the configuration for the MCP client
-type ClientConfig struct {
-	// Stdio
-	Path  string
-	Args  []string
-	Env   map[string]string
-	Debug bool
-
-	// SSE and Streamable HTTP
-	BaseURL string
-	Timeout time.Duration
-	Auth    AuthConfig
-}
-
-// Client wraps an MCP client session
-type Client struct {
-	session *mcp.ClientSession
-
-	k6_state *lib.State
-	ctx      context.Context
-	tracer   oteltrace.Tracer
-}
-
-// Exports defines the JavaScript-accessible functions
-func (m *MCPInstance) Exports() modules.Exports {
-	return modules.Exports{
-		Named: map[string]interface{}{
-			"StdioClient":          m.newStdioClient,
-			"SSEClient":            m.newSSEClient,
-			"StreamableHTTPClient": m.newStreamableHTTPClient,
+func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
+	moduleInstance := &Module{
+		MCP: &MCP{
+			vu: vu,
 		},
 	}
+	env := vu.InitEnv()
+
+	//moduleInstance.exports.Default = moduleInstance
+	moduleInstance.exports.Named = map[string]interface{}{
+		"Connect":   moduleInstance.Connect,
+		"ListTools": moduleInstance.ListTools,
+		"CallTool":  moduleInstance.CallTool,
+	}
+
+	// Initialize metrics
+	moduleInstance.metrics = &mcpMetrics{
+		RequestDuration: env.Registry.MustNewMetric(requestDurationMetricName, metrics.Trend, metrics.Time),
+		RequestCount:    env.Registry.MustNewMetric(requestCountMetricName, metrics.Counter),
+		RequestErrors:   env.Registry.MustNewMetric(requestErrorsMetricName, metrics.Counter),
+		TagsAndMeta: &metrics.TagsAndMeta{
+			Tags: env.Registry.RootTagSet(),
+		},
+	}
+
+	return moduleInstance
 }
 
-func (m *MCPInstance) newStdioClient(c sobek.ConstructorCall, rt *sobek.Runtime) *sobek.Object {
-	var cfg ClientConfig
-	if err := rt.ExportTo(c.Argument(0), &cfg); err != nil {
-		common.Throw(rt, fmt.Errorf("invalid config: %w", err))
-	}
-
-	cmd := exec.Command(cfg.Path, cfg.Args...)
-	for k, v := range cfg.Env {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
-	}
-
-	if cfg.Debug {
-		cmd.Stderr = os.Stderr
-	}
-
-	transport := &mcp.CommandTransport{
-		Command: cmd,
-	}
-
-	tracer := m.newTracer()
-	clientObj := m.connect(rt, transport, tracer, false)
-	var client *Client
-	if err := rt.ExportTo(clientObj, &client); err != nil {
-		common.Throw(rt, fmt.Errorf("failed to extract Client: %w", err))
-	}
-
-	return rt.ToValue(&Client{
-		session:  client.session,
-		k6_state: m.vu.State(),
-		ctx:      m.vu.Context(),
-		tracer:   tracer,
-	}).ToObject(rt)
+func (m *Module) Exports() modules.Exports {
+	return m.exports
 }
 
-func (m *MCPInstance) newSSEClient(c sobek.ConstructorCall, rt *sobek.Runtime) *sobek.Object {
-	var cfg ClientConfig
-	if err := rt.ExportTo(c.Argument(0), &cfg); err != nil {
-		common.Throw(rt, fmt.Errorf("invalid config: %w", err))
+func (m *MCP) getTracer() trace.Tracer {
+	if m.tracer != nil {
+		return m.tracer
 	}
 
-	transport := &mcp.SSEClientTransport{
-		Endpoint:   cfg.BaseURL,
-		HTTPClient: m.newk6HTTPClient(cfg),
+	// Check if in a running VU, if not use provider from init environment
+	if m.vu.State() == nil {
+		m.tracer = m.vu.InitEnv().TracerProvider.Tracer(tracerScope)
+	} else {
+		m.tracer = m.vu.State().TracerProvider.Tracer(tracerScope)
 	}
 
-	tracer := m.newTracer()
-	clientObj := m.connect(rt, transport, tracer, true)
-	var client *Client
-	if err := rt.ExportTo(clientObj, &client); err != nil {
-		common.Throw(rt, fmt.Errorf("failed to extract Client: %w", err))
-	}
-
-	return rt.ToValue(&Client{
-		session:  client.session,
-		k6_state: m.vu.State(),
-		ctx:      m.vu.Context(),
-		tracer:   tracer,
-	}).ToObject(rt)
+	return m.tracer
 }
 
-func (m *MCPInstance) newStreamableHTTPClient(c sobek.ConstructorCall, rt *sobek.Runtime) *sobek.Object {
-	var cfg ClientConfig
-	if err := rt.ExportTo(c.Argument(0), &cfg); err != nil {
-		common.Throw(rt, fmt.Errorf("invalid config: %w", err))
-	}
-
-	transport := &mcp.StreamableClientTransport{
-		Endpoint:   cfg.BaseURL,
-		HTTPClient: m.newk6HTTPClient(cfg),
-	}
-
-	tracer := m.newTracer()
-	clientObj := m.connect(rt, transport, tracer, false)
-	var client *Client
-	if err := rt.ExportTo(clientObj, &client); err != nil {
-		common.Throw(rt, fmt.Errorf("failed to extract Client: %w", err))
-	}
-
-	return rt.ToValue(&Client{
-		session:  client.session,
-		k6_state: m.vu.State(),
-		ctx:      m.vu.Context(),
-		tracer:   tracer,
-	}).ToObject(rt)
+func (m *MCP) getContext() context.Context {
+	// Since we are holding the connection open across VU iterations
+	// we can't use the VU context
+	return context.Background()
 }
 
-func (m *MCPInstance) newk6HTTPClient(cfg ClientConfig) *http.Client {
-	var tlsConfig *tls.Config
-	if m.vu.State().TLSConfig != nil {
-		tlsConfig = m.vu.State().TLSConfig.Clone()
-		tlsConfig.NextProtos = []string{"http/1.1"}
+func (m *MCP) getK6Transport() http.RoundTripper {
+	// Check if we are in a VU context
+	if m.vu.State() != nil {
+		return m.vu.State().Transport
 	}
+
+	// TODO: Customize this to the environment as much as possible
+	return http.DefaultClient.Transport
+}
+
+func (m *Module) Connect(cfg Config) error {
+	// Check if we are already connected
+	if m.session != nil {
+		return nil
+	}
+
+	baseTransport := otelhttp.NewTransport(m.MCP.getK6Transport())
 
 	httpClient := &http.Client{
-		Transport: otelhttp.NewTransport(
-			&http.Transport{
-				DialContext:       m.vu.State().Dialer.DialContext,
-				Proxy:             http.ProxyFromEnvironment,
-				TLSClientConfig:   tlsConfig,
-				DisableKeepAlives: m.vu.State().Options.NoConnectionReuse.ValueOrZero() || m.vu.State().Options.NoVUConnectionReuse.ValueOrZero(),
-			},
-		),
-		Timeout: cfg.Timeout,
+		Transport: baseTransport,
 	}
 
 	if cfg.Auth.BearerToken != "" {
@@ -247,262 +166,110 @@ func (m *MCPInstance) newk6HTTPClient(cfg ClientConfig) *http.Client {
 		}
 		tokenSource := oauth2.StaticTokenSource(&token)
 
-		return oauth2.NewClient(ctx, tokenSource)
+		httpClient = oauth2.NewClient(ctx, tokenSource)
 	}
 
-	return httpClient
-}
-
-func (m *MCPInstance) connect(rt *sobek.Runtime, transport mcp.Transport, tracer oteltrace.Tracer, isSSE bool) *sobek.Object {
-	client := mcp.NewClient(&mcp.Implementation{Name: "k6", Version: "1.0.0"}, nil)
-
-	ctx, span := tracer.Start(m.vu.Context(), connectSpanName)
-	defer span.End()
-
-	session, err := client.Connect(ctx, transport, nil)
-	if err != nil {
-		common.Throw(rt, fmt.Errorf("connection error: %w", err))
+	mcpTransport := &mcp.StreamableClientTransport{
+		Endpoint:   cfg.BaseURL,
+		HTTPClient: httpClient,
 	}
 
-	return rt.ToValue(&Client{session: session}).ToObject(rt)
-}
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "k6", Version: "1.0.0"}, nil)
 
-func (m *MCPInstance) newTracer() oteltrace.Tracer {
-	return m.vu.State().TracerProvider.Tracer(tracerScope)
-}
-
-func (c *Client) Ping() bool {
-	err := c.session.Ping(c.ctx, &mcp.PingParams{})
-	return err == nil
-}
-
-func (c *Client) ListTools(r mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
-	ctx, span := c.tracer.Start(c.ctx, listToolsSpanName)
-	defer span.End()
-	start := time.Now()
-	result, err := c.session.ListTools(ctx, &r)
-	pushRequestMetrics(c, listToolsMethodName, time.Since(start), err)
-	return result, err
-}
-
-type ListAllToolsParams struct {
-	Meta mcp.Meta
-}
-
-type ListAllToolsResult struct {
-	Tools []mcp.Tool
-}
-
-func (c *Client) ListAllTools(r ListAllToolsParams) (*ListAllToolsResult, error) {
-	if r.Meta == nil {
-		r.Meta = mcp.Meta{}
-	}
-
-	var allTools []mcp.Tool
-	cursor := ""
 	var err error
-	for {
-		params := &mcp.ListToolsParams{Meta: r.Meta}
-		if cursor != "" {
-			params.Cursor = cursor
-		}
-		var result *mcp.ListToolsResult
-		ctx, span := c.tracer.Start(c.ctx, listToolsSpanName)
-		defer span.End()
-		start := time.Now()
-		result, err = c.session.ListTools(ctx, params)
-		pushRequestMetrics(c, listToolsMethodName, time.Since(start), err)
-		if err != nil {
-			break
-		}
+	var session *mcp.ClientSession
+	startTime := time.Now()
+	ctx, span := m.MCP.getTracer().Start(m.MCP.getContext(), connectSpanName)
+	span.SetAttributes(attribute.KeyValue{
+		Key:   "rpc.method",
+		Value: attribute.StringValue(connectMethodName),
+	})
 
-		for _, t := range result.Tools {
-			if t != nil {
-				allTools = append(allTools, *t)
-			}
-		}
-
-		if result.NextCursor == "" {
-			break
-		}
-		cursor = result.NextCursor
-	}
-
+	session, err = mcpClient.Connect(ctx, mcpTransport, nil)
+	duration := time.Since(startTime)
+	span.End()
+	m.pushRequestMetrics(connectMethodName, duration, err)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list tools: %w", err)
+		return err
 	}
 
-	return &ListAllToolsResult{
-		Tools: allTools,
-	}, nil
+	m.session = session
+
+	return nil
 }
 
-func (c *Client) CallTool(r mcp.CallToolParams) (*mcp.CallToolResult, error) {
-	ctx, span := c.tracer.Start(c.ctx, callToolSpanName)
-	defer span.End()
-	start := time.Now()
-	result, err := c.session.CallTool(ctx, &r)
-	pushRequestMetrics(c, callToolMethodName, time.Since(start), err)
-	return result, err
-}
-
-func (c *Client) ListResources(r mcp.ListResourcesParams) (*mcp.ListResourcesResult, error) {
-	ctx, span := c.tracer.Start(c.ctx, listResourcesSpanName)
-	defer span.End()
-	start := time.Now()
-	res, err := c.session.ListResources(ctx, &r)
-	pushRequestMetrics(c, listResourcesMethodName, time.Since(start), err)
-	return res, err
-}
-
-func (c *Client) ReadResource(r mcp.ReadResourceParams) (*mcp.ReadResourceResult, error) {
-	ctx, span := c.tracer.Start(c.ctx, readResourceSpanName)
-	defer span.End()
-	start := time.Now()
-	res, err := c.session.ReadResource(ctx, &r)
-	pushRequestMetrics(c, readResourceMethodName, time.Since(start), err)
-	return res, err
-}
-
-func (c *Client) ListPrompts(r mcp.ListPromptsParams) (*mcp.ListPromptsResult, error) {
-	ctx, span := c.tracer.Start(c.ctx, listPromptsSpanName)
-	defer span.End()
-	start := time.Now()
-	res, err := c.session.ListPrompts(ctx, &r)
-	pushRequestMetrics(c, listPromptsMethodName, time.Since(start), err)
-	return res, err
-}
-
-func (c *Client) GetPrompt(r mcp.GetPromptParams) (*mcp.GetPromptResult, error) {
-	ctx, span := c.tracer.Start(c.ctx, getPromptSpanName)
-	defer span.End()
-	start := time.Now()
-	res, err := c.session.GetPrompt(ctx, &r)
-	pushRequestMetrics(c, getPromptMethodName, time.Since(start), err)
-	return res, err
-}
-
-type ListAllResourcesParams struct {
-	Meta mcp.Meta
-}
-
-type ListAllResourcesResult struct {
-	Resources []mcp.Resource
-}
-
-func (c *Client) ListAllResources(r ListAllResourcesParams) (*ListAllResourcesResult, error) {
-	if r.Meta == nil {
-		r.Meta = mcp.Meta{}
+func (m *Module) ListTools(params mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
+	if m.session == nil {
+		return nil, fmt.Errorf("must call `Connect()` before calling `ListTools()`")
 	}
 
-	var allResources []mcp.Resource
-	cursor := ""
 	var err error
-	for {
-		params := &mcp.ListResourcesParams{Meta: r.Meta}
-		if cursor != "" {
-			params.Cursor = cursor
-		}
-		var result *mcp.ListResourcesResult
-		ctx, span := c.tracer.Start(c.ctx, listResourcesSpanName)
-		defer span.End()
-		start := time.Now()
-		result, err = c.session.ListResources(ctx, params)
-		pushRequestMetrics(c, listResourcesMethodName, time.Since(start), err)
-		if err != nil {
-			break
-		}
+	var result *mcp.ListToolsResult
+	startTime := time.Now()
+	ctx, span := m.MCP.getTracer().Start(m.MCP.getContext(), listToolsSpanName)
+	span.SetAttributes(attribute.KeyValue{
+		Key:   "rpc.method",
+		Value: attribute.StringValue(listToolsMethodName),
+	})
 
-		for _, res := range result.Resources {
-			if res != nil {
-				allResources = append(allResources, *res)
-			}
-		}
-
-		if result.NextCursor == "" {
-			break
-		}
-		cursor = result.NextCursor
-	}
-
+	result, err = m.session.ListTools(ctx, &params)
+	duration := time.Since(startTime)
+	span.End()
+	m.pushRequestMetrics(listToolsMethodName, duration, err)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list resources: %w", err)
+		return nil, err
 	}
 
-	return &ListAllResourcesResult{
-		Resources: allResources,
-	}, nil
+	return result, nil
 }
 
-type ListAllPromptsParams struct {
-	Meta mcp.Meta
-}
-
-type ListAllPromptsResult struct {
-	Prompts []mcp.Prompt
-}
-
-func (c *Client) ListAllPrompts(r ListAllPromptsParams) (*ListAllPromptsResult, error) {
-	if r.Meta == nil {
-		r.Meta = mcp.Meta{}
+func (m *Module) CallTool(params mcp.CallToolParams) (*mcp.CallToolResult, error) {
+	if m.session == nil {
+		return nil, fmt.Errorf("must call `Connect()` before calling `CallTool()`")
 	}
 
-	var allPrompts []mcp.Prompt
-	cursor := ""
 	var err error
-	for {
-		params := &mcp.ListPromptsParams{Meta: r.Meta}
-		if cursor != "" {
-			params.Cursor = cursor
-		}
-		var result *mcp.ListPromptsResult
-		ctx, span := c.tracer.Start(c.ctx, listPromptsSpanName)
-		defer span.End()
-		start := time.Now()
-		result, err = c.session.ListPrompts(ctx, params)
-		pushRequestMetrics(c, listPromptsMethodName, time.Since(start), err)
-		if err != nil {
-			break
-		}
+	var result *mcp.CallToolResult
+	startTime := time.Now()
+	ctx, span := m.MCP.getTracer().Start(m.MCP.getContext(), callToolSpanName)
+	span.SetAttributes(attribute.KeyValue{
+		Key:   "rpc.method",
+		Value: attribute.StringValue(callToolMethodName),
+	})
 
-		for _, p := range result.Prompts {
-			if p != nil {
-				allPrompts = append(allPrompts, *p)
-			}
-		}
-
-		if result.NextCursor == "" {
-			break
-		}
-		cursor = result.NextCursor
-	}
-
+	result, err = m.session.CallTool(ctx, &params)
+	duration := time.Since(startTime)
+	span.End()
+	m.pushRequestMetrics(callToolMethodName, duration, err)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list prompts: %w", err)
+		return nil, err
 	}
 
-	return &ListAllPromptsResult{
-		Prompts: allPrompts,
-	}, nil
+	return result, nil
 }
 
-func pushRequestMetrics(client *Client, method string, duration time.Duration, err error) {
-	tags := client.k6_state.Tags.GetCurrentValues().Tags.With(
+func (m *Module) pushRequestMetrics(method string, duration time.Duration, err error) {
+	// Check if we have a VU state to write metrics to
+	if m.vu.State() == nil {
+		return
+	}
+
+	tags := m.vu.State().Tags.GetCurrentValues().Tags.With(
 		"method", method,
 	)
 
-	metrics.PushIfNotDone(client.ctx, client.k6_state.Samples, metrics.Sample{
+	metrics.PushIfNotDone(m.MCP.getContext(), m.vu.State().Samples, metrics.Sample{
 		TimeSeries: metrics.TimeSeries{
-			Metric: mcp_metrics.RequestDuration,
+			Metric: m.metrics.RequestDuration,
 			Tags:   tags,
 		},
 		Time:  time.Now(),
 		Value: float64(duration) / float64(time.Millisecond),
 	})
 
-	metrics.PushIfNotDone(client.ctx, client.k6_state.Samples, metrics.Sample{
+	metrics.PushIfNotDone(m.MCP.getContext(), m.vu.State().Samples, metrics.Sample{
 		TimeSeries: metrics.TimeSeries{
-			Metric: mcp_metrics.RequestCount,
+			Metric: m.metrics.RequestCount,
 			Tags:   tags,
 		},
 		Time:  time.Now(),
@@ -510,9 +277,9 @@ func pushRequestMetrics(client *Client, method string, duration time.Duration, e
 	})
 
 	if err != nil {
-		metrics.PushIfNotDone(client.ctx, client.k6_state.Samples, metrics.Sample{
+		metrics.PushIfNotDone(m.MCP.getContext(), m.vu.State().Samples, metrics.Sample{
 			TimeSeries: metrics.TimeSeries{
-				Metric: mcp_metrics.RequestErrors,
+				Metric: m.metrics.RequestErrors,
 				Tags:   tags,
 			},
 			Time:  time.Now(),
