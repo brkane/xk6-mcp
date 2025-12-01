@@ -1,4 +1,4 @@
-package compare
+package mcp
 
 import (
 	"context"
@@ -113,9 +113,9 @@ func (m *MCPInstance) newStdioClient(c sobek.ConstructorCall, rt *sobek.Runtime)
 		cmd.Stderr = os.Stderr
 	}
 
-  transport := &mcp.CommandTransport{
-    Command: cmd,
-  }
+	transport := &mcp.CommandTransport{
+		Command: cmd,
+	}
 
 	clientObj := m.connect(rt, transport, false)
 	var client *Client
@@ -135,10 +135,10 @@ func (m *MCPInstance) newSSEClient(c sobek.ConstructorCall, rt *sobek.Runtime) *
 		common.Throw(rt, fmt.Errorf("invalid config: %w", err))
 	}
 
-  transport := &mcp.SSEClientTransport{
-    Endpoint: cfg.BaseURL,
-    HTTPClient: m.newk6HTTPClient(),
-  }
+	transport := &mcp.SSEClientTransport{
+		Endpoint:   cfg.BaseURL,
+		HTTPClient: m.newk6HTTPClient(),
+	}
 
 	clientObj := m.connect(rt, transport, true)
 	var client *Client
@@ -158,10 +158,10 @@ func (m *MCPInstance) newStreamableHTTPClient(c sobek.ConstructorCall, rt *sobek
 		common.Throw(rt, fmt.Errorf("invalid config: %w", err))
 	}
 
-  transport := &mcp.StreamableClientTransport{
-    Endpoint: cfg.BaseURL,
-    HTTPClient: m.newk6HTTPClient(),
-  }
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:   cfg.BaseURL,
+		HTTPClient: m.newk6HTTPClient(),
+	}
 
 	clientObj := m.connect(rt, transport, false)
 	var client *Client
@@ -205,7 +205,7 @@ func (m *MCPInstance) connect(rt *sobek.Runtime, transport mcp.Transport, isSSE 
 	}
 	defer cancel()
 
-  client := mcp.NewClient(&mcp.Implementation{Name: "k6", Version: "1.0.0"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "k6", Version: "1.0.0"}, nil)
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		common.Throw(rt, fmt.Errorf("connection error: %w", err))
