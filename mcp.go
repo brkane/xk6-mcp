@@ -9,9 +9,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/metrics"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/oauth2"
 )
 
@@ -22,6 +19,24 @@ func init() {
 // MCP is the root module struct
 type (
 	RootModule struct{}
+
+	// ClientConfig represents the configuration for the MCP client
+	ClientConfig struct {
+		// Stdio
+		Path  string
+		Args  []string
+		Env   map[string]string
+		Debug bool
+
+		// SSE and Streamable HTTP
+		BaseURL string
+		Timeout time.Duration
+		Auth    AuthConfig
+	}
+
+	AuthConfig struct {
+		BearerToken string
+	}
 )
 
 	requestDurationMetricName = "mcp_request_duration"
@@ -89,10 +104,34 @@ func New() *RootModule {
 	return &RootModule{}
 }
 
-func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
-	moduleInstance := &Module{
-		MCP: &MCP{
-			vu: vu,
+// MCPInstance represents an instance of the MCP module
+type MCPInstance struct {
+	vu     modules.VU
+	logger logrus.FieldLogger
+}
+
+type mcpMetrics struct {
+	RequestDuration *metrics.Metric
+	RequestCount    *metrics.Metric
+	RequestErrors   *metrics.Metric
+
+	TagsAndMeta *metrics.TagsAndMeta
+}
+
+// Client wraps an MCP client session
+type Client struct {
+	session *mcp.ClientSession
+
+	k6_state *lib.State
+}
+
+// Exports defines the JavaScript-accessible functions
+func (m *MCPInstance) Exports() modules.Exports {
+	return modules.Exports{
+		Named: map[string]interface{}{
+			"StdioClient":          m.newStdioClient,
+			"SSEClient":            m.newSSEClient,
+			"StreamableHTTPClient": m.newStreamableHTTPClient,
 		},
 	}
 	env := vu.InitEnv()
@@ -155,7 +194,7 @@ func (m *MCP) getTracer() trace.Tracer {
 
 	transport := &mcp.SSEClientTransport{
 		Endpoint:   cfg.BaseURL,
-		HTTPClient: m.newk6HTTPClient(),
+		HTTPClient: m.newk6HTTPClient(cfg),
 	}
 
 	clientObj := m.connect(rt, transport, true)
@@ -175,7 +214,7 @@ func (m *MCPInstance) newStreamableHTTPClient(c sobek.ConstructorCall, rt *sobek
 
 	transport := &mcp.StreamableClientTransport{
 		Endpoint:   cfg.BaseURL,
-		HTTPClient: m.newk6HTTPClient(),
+		HTTPClient: m.newk6HTTPClient(cfg),
 	}
 
 	clientObj := m.connect(rt, transport, false)
@@ -190,14 +229,40 @@ func (m *MCPInstance) newStreamableHTTPClient(c sobek.ConstructorCall, rt *sobek
 	}).ToObject(rt)
 }
 
-func (m *MCP) getK6Transport() http.RoundTripper {
-	// Check if we are in a VU context
-	if m.vu.State() != nil {
-		return m.vu.State().Transport
+func (m *MCPInstance) newk6HTTPClient(cfg ClientConfig) *http.Client {
+	var tlsConfig *tls.Config
+	if m.vu.State() != nil && m.vu.State().TLSConfig != nil {
+		tlsConfig = m.vu.State().TLSConfig.Clone()
+		tlsConfig.NextProtos = []string{"http/1.1"}
 	}
 
-	// TODO: Customize this to the environment as much as possible
-	return http.DefaultClient.Transport
+	transport := http.Transport{
+		Proxy:           http.ProxyFromEnvironment,
+		TLSClientConfig: tlsConfig,
+	}
+	if m.vu.State() != nil {
+		transport.DisableKeepAlives = m.vu.State().Options.NoConnectionReuse.ValueOrZero() || m.vu.State().Options.NoVUConnectionReuse.ValueOrZero()
+		transport.DialContext = m.vu.State().Dialer.DialContext
+	}
+
+	httpClient := &http.Client{
+		Transport: &transport,
+	}
+
+	if cfg.Auth.BearerToken != "" {
+		ctx := context.Background()
+
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
+
+		token := oauth2.Token{
+			AccessToken: cfg.Auth.BearerToken,
+		}
+		tokenSource := oauth2.StaticTokenSource(&token)
+
+		httpClient = oauth2.NewClient(ctx, tokenSource)
+	}
+
+	return httpClient
 }
 
 func (m *Module) Connect(cfg Config) error {
