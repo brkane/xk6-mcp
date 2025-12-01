@@ -109,8 +109,35 @@ func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 	return moduleInstance
 }
 
-func (m *Module) Exports() modules.Exports {
-	return m.exports
+func (m *MCPInstance) newStdioClient(c sobek.ConstructorCall, rt *sobek.Runtime) *sobek.Object {
+	var cfg ClientConfig
+	if err := rt.ExportTo(c.Argument(0), &cfg); err != nil {
+		common.Throw(rt, fmt.Errorf("invalid config: %w", err))
+	}
+
+	cmd := exec.Command(cfg.Path, cfg.Args...)
+	for k, v := range cfg.Env {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	if cfg.Debug {
+		cmd.Stderr = os.Stderr
+	}
+
+	transport := &mcp.CommandTransport{
+		Command: cmd,
+	}
+
+	clientObj := m.connect(rt, transport, false)
+	var client *Client
+	if err := rt.ExportTo(clientObj, &client); err != nil {
+		common.Throw(rt, fmt.Errorf("failed to extract Client: %w", err))
+	}
+
+	return rt.ToValue(&Client{
+		session:  client.session,
+		k6_state: m.vu.State(),
+	}).ToObject(rt)
 }
 
 func (m *MCP) getTracer() trace.Tracer {
@@ -118,20 +145,41 @@ func (m *MCP) getTracer() trace.Tracer {
 		return m.tracer
 	}
 
-	// Check if in a running VU, if not use provider from init environment
-	if m.vu.State() == nil {
-		m.tracer = m.vu.InitEnv().TracerProvider.Tracer(tracerScope)
-	} else {
-		m.tracer = m.vu.State().TracerProvider.Tracer(tracerScope)
+	transport := &mcp.SSEClientTransport{
+		Endpoint:   cfg.BaseURL,
+		HTTPClient: m.newk6HTTPClient(),
+	}
+
+	clientObj := m.connect(rt, transport, true)
+	var client *Client
+	if err := rt.ExportTo(clientObj, &client); err != nil {
+		common.Throw(rt, fmt.Errorf("failed to extract Client: %w", err))
 	}
 
 	return m.tracer
 }
 
-func (m *MCP) getContext() context.Context {
-	// Since we are holding the connection open across VU iterations
-	// we can't use the VU context
-	return context.Background()
+func (m *MCPInstance) newStreamableHTTPClient(c sobek.ConstructorCall, rt *sobek.Runtime) *sobek.Object {
+	var cfg ClientConfig
+	if err := rt.ExportTo(c.Argument(0), &cfg); err != nil {
+		common.Throw(rt, fmt.Errorf("invalid config: %w", err))
+	}
+
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:   cfg.BaseURL,
+		HTTPClient: m.newk6HTTPClient(),
+	}
+
+	clientObj := m.connect(rt, transport, false)
+	var client *Client
+	if err := rt.ExportTo(clientObj, &client); err != nil {
+		common.Throw(rt, fmt.Errorf("failed to extract Client: %w", err))
+	}
+
+	return rt.ToValue(&Client{
+		session:  client.session,
+		k6_state: m.vu.State(),
+	}).ToObject(rt)
 }
 
 func (m *MCP) getK6Transport() http.RoundTripper {
@@ -161,12 +209,10 @@ func (m *Module) Connect(cfg Config) error {
 
 		ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 
-		token := oauth2.Token{
-			AccessToken: cfg.Auth.BearerToken,
-		}
-		tokenSource := oauth2.StaticTokenSource(&token)
-
-		httpClient = oauth2.NewClient(ctx, tokenSource)
+	client := mcp.NewClient(&mcp.Implementation{Name: "k6", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		common.Throw(rt, fmt.Errorf("connection error: %w", err))
 	}
 
 	mcpTransport := &mcp.StreamableClientTransport{
