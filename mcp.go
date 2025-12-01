@@ -19,20 +19,28 @@ func init() {
 	modules.Register("k6/x/mcp", New())
 }
 
-const (
-	tracerScope       = "github.com/grafana/xk6-mcp"
-	connectSpanName   = "Connect"
-	listToolsSpanName = "ListTools"
-	callToolSpanName  = "CallTool"
+// MCP is the root module struct
+type (
+	RootModule struct{}
+)
 
 	requestDurationMetricName = "mcp_request_duration"
 	requestCountMetricName    = "mcp_request_count"
 	requestErrorsMetricName   = "mcp_request_errors"
 
-	connectMethodName   = "connect"
-	listToolsMethodName = "tools/list"
-	callToolMethodName  = "tools/call"
+// New returns a pointer to a new RootModule instance.
+func New() *RootModule {
+	return &RootModule{}
+}
+
+var (
+	_ modules.Instance = &MCPInstance{}
+	_ modules.Module   = &RootModule{}
 )
+
+// NewModuleInstance initializes a new module instance
+func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
+	env := vu.InitEnv()
 
 type (
 	// MCP is the instance of the JS module
