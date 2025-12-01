@@ -37,7 +37,6 @@ type (
 
 		// SSE and Streamable HTTP
 		BaseURL string
-		Timeout time.Duration
 		Auth    AuthConfig
 	}
 
