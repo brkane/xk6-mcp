@@ -17,9 +17,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.k6.io/k6/js/modulestest"
+	k6lib "go.k6.io/k6/lib"
+	k6metrics "go.k6.io/k6/metrics"
 )
 
 type (
+	testCase struct {
+		runtime *modulestest.Runtime
+		samples chan k6metrics.SampleContainer
+	}
+
 	jsonRPCRequest struct {
 		JSONRPC string      `json:"jsonrpc"`
 		Method  string      `json:"method"`
@@ -40,8 +47,18 @@ const (
 	toolName string = "myTool"
 )
 
-func setupRuntime(t *testing.T) *modulestest.VU {
+func setupTest(t *testing.T) *testCase {
 	t.Helper()
+
+	registry := k6metrics.NewRegistry()
+	samples := make(chan k6metrics.SampleContainer, 1000)
+	state := &k6lib.State{
+		Samples: samples,
+		Tags: k6lib.NewVUStateTags(registry.RootTagSet().WithTagsFromMap(map[string]string{
+			"group": k6lib.RootGroupPath,
+		})),
+		Transport: http.DefaultTransport,
+	}
 
 	rt := modulestest.NewRuntime(t)
 	vu := rt.VU
@@ -50,7 +67,12 @@ func setupRuntime(t *testing.T) *modulestest.VU {
 	require.True(t, ok)
 	require.NoError(t, vu.RuntimeField.Set("mcp", mod.Exports().Named))
 
-	return vu
+	rt.MoveToVUContext(state)
+
+	return &testCase{
+		runtime: rt,
+		samples: samples,
+	}
 }
 
 func streamableHandler(t *testing.T) (*mcpsdk.StreamableHTTPHandler, error) {
@@ -122,9 +144,9 @@ func TestStreamableBearerAuth(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(handlerFunc))
 	defer ts.Close()
 
-	vu := setupRuntime(t)
+	tc := setupTest(t)
 
-	_, err = vu.RuntimeField.RunString(
+	_, err = tc.runtime.VU.Runtime().RunString(
 		fmt.Sprintf(`const client = mcp.StreamableHTTPClient({
       base_url: "%s",
       auth: {
@@ -161,9 +183,9 @@ func TestListTools(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(handlerFunc))
 	defer ts.Close()
 
-	vu := setupRuntime(t)
+	tc := setupTest(t)
 
-	_, err = vu.RuntimeField.RunString(
+	_, err = tc.runtime.VU.Runtime().RunString(
 		fmt.Sprintf(`const client = mcp.StreamableHTTPClient({
       base_url: "%s"
     });
@@ -172,4 +194,48 @@ func TestListTools(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.True(t, listToolsCalled)
+}
+
+func TestCallTool(t *testing.T) {
+	var callToolCalled bool
+	handler, err := streamableHandler(t)
+	handlerFunc := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			jsonReq, err := parseJSONRPCBody(r)
+			if err != nil {
+				if err != io.EOF {
+					require.NoError(t, err)
+				}
+			}
+
+			if jsonReq.Method == "tools/call" {
+				var params mcpsdk.CallToolParams
+				paramBytes, err := json.Marshal(jsonReq.Params)
+				require.NoError(t, err)
+
+				err = json.Unmarshal(paramBytes, &params)
+				require.NoError(t, err)
+
+				if params.Name == toolName {
+					callToolCalled = true
+				}
+			}
+		}
+		handler.ServeHTTP(w, r)
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(handlerFunc))
+	defer ts.Close()
+
+	tc := setupTest(t)
+
+	_, err = tc.runtime.VU.Runtime().RunString(
+		fmt.Sprintf(`const client = mcp.StreamableHTTPClient({
+      base_url: "%s"
+    });
+    const tools = client.callTool({name: "%s", arguments: {id: 1}});`, ts.URL, toolName),
+	)
+
+	assert.NoError(t, err)
+	assert.True(t, callToolCalled)
 }

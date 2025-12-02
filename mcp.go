@@ -8,8 +8,10 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.k6.io/k6/js/modules"
-	"go.k6.io/k6/metrics"
+	k6metrics "go.k6.io/k6/metrics"
 	"golang.org/x/oauth2"
+
+	"github.com/grafana/xk6-mcp/metrics"
 )
 
 func init() {
@@ -19,6 +21,13 @@ func init() {
 // MCP is the root module struct
 type (
 	RootModule struct{}
+
+	// MCPInstance represents an instance of the MCP module
+	MCPInstance struct {
+		vu       modules.VU
+		logger   logrus.FieldLogger
+		registry *k6metrics.Registry
+	}
 
 	// ClientConfig represents the configuration for the MCP client
 	ClientConfig struct {
@@ -38,10 +47,6 @@ type (
 	}
 )
 
-	requestDurationMetricName = "mcp_request_duration"
-	requestCountMetricName    = "mcp_request_count"
-	requestErrorsMetricName   = "mcp_request_errors"
-
 // New returns a pointer to a new RootModule instance.
 func New() *RootModule {
 	return &RootModule{}
@@ -56,25 +61,12 @@ var (
 func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 	env := vu.InitEnv()
 
-type (
-	// MCP is the instance of the JS module
-	MCP struct {
-		vu      modules.VU
-		session *mcp.ClientSession
-		tracer  trace.Tracer
-		metrics *mcpMetrics
-	}
+	logger := env.Logger.WithField("component", "xk6-mcp")
 
-	// RootModule is the global module instance that will create module instances for each VU.
-	RootModule struct{}
-
-	Module struct {
-		*MCP
-		exports modules.Exports
-	}
-
-	AuthConfig struct {
-		BearerToken string
+	return &MCPInstance{
+		vu:       vu,
+		logger:   logger,
+		registry: env.Registry,
 	}
 
 	Config struct {
@@ -103,25 +95,11 @@ func New() *RootModule {
 	return &RootModule{}
 }
 
-// MCPInstance represents an instance of the MCP module
-type MCPInstance struct {
-	vu     modules.VU
-	logger logrus.FieldLogger
-}
-
-type mcpMetrics struct {
-	RequestDuration *metrics.Metric
-	RequestCount    *metrics.Metric
-	RequestErrors   *metrics.Metric
-
-	TagsAndMeta *metrics.TagsAndMeta
-}
-
 // Client wraps an MCP client session
 type Client struct {
+	ctx     context.Context
 	session *mcp.ClientSession
-
-	k6_state *lib.State
+	metrics *metrics.K6Metrics
 }
 
 // Exports defines the JavaScript-accessible functions
@@ -181,8 +159,8 @@ func (m *MCPInstance) newStdioClient(c sobek.ConstructorCall, rt *sobek.Runtime)
 	}
 
 	return rt.ToValue(&Client{
-		session:  client.session,
-		k6_state: m.vu.State(),
+		ctx:     m.vu.Context(),
+		session: client.session,
 	}).ToObject(rt)
 }
 
@@ -202,7 +180,10 @@ func (m *MCP) getTracer() trace.Tracer {
 		common.Throw(rt, fmt.Errorf("failed to extract Client: %w", err))
 	}
 
-	return m.tracer
+	return rt.ToValue(&Client{
+		ctx:     m.vu.Context(),
+		session: client.session,
+	}).ToObject(rt)
 }
 
 func (m *MCPInstance) newStreamableHTTPClient(c sobek.ConstructorCall, rt *sobek.Runtime) *sobek.Object {
@@ -222,9 +203,16 @@ func (m *MCPInstance) newStreamableHTTPClient(c sobek.ConstructorCall, rt *sobek
 		common.Throw(rt, fmt.Errorf("failed to extract Client: %w", err))
 	}
 
+	mcpMetrics := metrics.NewK6Metrics(
+		m.registry,
+		m.vu.State().Samples,
+		m.vu.State().Tags.GetCurrentValues(),
+	)
+
 	return rt.ToValue(&Client{
-		session:  client.session,
-		k6_state: m.vu.State(),
+		ctx:     m.vu.Context(),
+		session: client.session,
+		metrics: mcpMetrics,
 	}).ToObject(rt)
 }
 
@@ -241,6 +229,8 @@ func (m *MCPInstance) newk6HTTPClient(cfg ClientConfig) *http.Client {
 	}
 	if m.vu.State() != nil {
 		transport.DisableKeepAlives = m.vu.State().Options.NoConnectionReuse.ValueOrZero() || m.vu.State().Options.NoVUConnectionReuse.ValueOrZero()
+	}
+	if m.vu.State().Dialer != nil {
 		transport.DialContext = m.vu.State().Dialer.DialContext
 	}
 
@@ -292,8 +282,9 @@ func (m *Module) Connect(cfg Config) error {
 		HTTPClient: httpClient,
 	}
 
-	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "k6", Version: "1.0.0"}, nil)
-
+	var allTools []mcp.Tool
+	cursor := ""
+	//start := time.Now()
 	var err error
 	var session *mcp.ClientSession
 	startTime := time.Now()
@@ -303,10 +294,19 @@ func (m *Module) Connect(cfg Config) error {
 		Value: attribute.StringValue(connectMethodName),
 	})
 
-	session, err = mcpClient.Connect(ctx, mcpTransport, nil)
-	duration := time.Since(startTime)
-	span.End()
-	m.pushRequestMetrics(connectMethodName, duration, err)
+		for _, t := range result.Tools {
+			if t != nil {
+				allTools = append(allTools, *t)
+			}
+		}
+
+		if result.NextCursor == "" {
+			break
+		}
+		cursor = result.NextCursor
+	}
+
+	//pushRequestMetrics(c, "ListAllTools", time.Since(start), err)
 	if err != nil {
 		return err
 	}
@@ -316,11 +316,58 @@ func (m *Module) Connect(cfg Config) error {
 	return nil
 }
 
-func (m *Module) ListTools(params mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
-	if m.session == nil {
-		return nil, fmt.Errorf("must call `Connect()` before calling `ListTools()`")
+func (c *Client) CallTool(r mcp.CallToolParams) (*mcp.CallToolResult, error) {
+	start := time.Now()
+	result, err := c.session.CallTool(c.ctx, &r)
+	c.metrics.Push(c.ctx, "CallTool", time.Since(start), err)
+	//pushRequestMetrics(c, "CallTool", time.Since(start), err)
+	return result, err
+}
+
+func (c *Client) ListResources(r mcp.ListResourcesParams) (*mcp.ListResourcesResult, error) {
+	//start := time.Now()
+	res, err := c.session.ListResources(context.Background(), &r)
+	//pushRequestMetrics(c, "ListResources", time.Since(start), err)
+	return res, err
+}
+
+func (c *Client) ReadResource(r mcp.ReadResourceParams) (*mcp.ReadResourceResult, error) {
+	//start := time.Now()
+	res, err := c.session.ReadResource(context.Background(), &r)
+	//pushRequestMetrics(c, "ReadResource", time.Since(start), err)
+	return res, err
+}
+
+func (c *Client) ListPrompts(r mcp.ListPromptsParams) (*mcp.ListPromptsResult, error) {
+	//start := time.Now()
+	res, err := c.session.ListPrompts(context.Background(), &r)
+	//pushRequestMetrics(c, "ListPrompts", time.Since(start), err)
+	return res, err
+}
+
+func (c *Client) GetPrompt(r mcp.GetPromptParams) (*mcp.GetPromptResult, error) {
+	//start := time.Now()
+	res, err := c.session.GetPrompt(context.Background(), &r)
+	//pushRequestMetrics(c, "GetPrompt", time.Since(start), err)
+	return res, err
+}
+
+type ListAllResourcesParams struct {
+	Meta mcp.Meta
+}
+
+type ListAllResourcesResult struct {
+	Resources []mcp.Resource
+}
+
+func (c *Client) ListAllResources(r ListAllResourcesParams) (*ListAllResourcesResult, error) {
+	if r.Meta == nil {
+		r.Meta = mcp.Meta{}
 	}
 
+	var allResources []mcp.Resource
+	cursor := ""
+	//start := time.Now()
 	var err error
 	var result *mcp.ListToolsResult
 	startTime := time.Now()
@@ -330,10 +377,19 @@ func (m *Module) ListTools(params mcp.ListToolsParams) (*mcp.ListToolsResult, er
 		Value: attribute.StringValue(listToolsMethodName),
 	})
 
-	result, err = m.session.ListTools(ctx, &params)
-	duration := time.Since(startTime)
-	span.End()
-	m.pushRequestMetrics(listToolsMethodName, duration, err)
+		for _, res := range result.Resources {
+			if res != nil {
+				allResources = append(allResources, *res)
+			}
+		}
+
+		if result.NextCursor == "" {
+			break
+		}
+		cursor = result.NextCursor
+	}
+
+	//pushRequestMetrics(c, "ListAllResources", time.Since(start), err)
 	if err != nil {
 		return nil, err
 	}
@@ -346,6 +402,9 @@ func (m *Module) CallTool(params mcp.CallToolParams) (*mcp.CallToolResult, error
 		return nil, fmt.Errorf("must call `Connect()` before calling `CallTool()`")
 	}
 
+	var allPrompts []mcp.Prompt
+	cursor := ""
+	//start := time.Now()
 	var err error
 	var result *mcp.CallToolResult
 	startTime := time.Now()
@@ -355,53 +414,22 @@ func (m *Module) CallTool(params mcp.CallToolParams) (*mcp.CallToolResult, error
 		Value: attribute.StringValue(callToolMethodName),
 	})
 
-	result, err = m.session.CallTool(ctx, &params)
-	duration := time.Since(startTime)
-	span.End()
-	m.pushRequestMetrics(callToolMethodName, duration, err)
+		for _, p := range result.Prompts {
+			if p != nil {
+				allPrompts = append(allPrompts, *p)
+			}
+		}
+
+		if result.NextCursor == "" {
+			break
+		}
+		cursor = result.NextCursor
+	}
+
+	//pushRequestMetrics(c, "ListAllPrompts", time.Since(start), err)
 	if err != nil {
 		return nil, err
 	}
 
 	return result, nil
-}
-
-func (m *Module) pushRequestMetrics(method string, duration time.Duration, err error) {
-	// Check if we have a VU state to write metrics to
-	if m.vu.State() == nil {
-		return
-	}
-
-	tags := m.vu.State().Tags.GetCurrentValues().Tags.With(
-		"method", method,
-	)
-
-	metrics.PushIfNotDone(m.MCP.getContext(), m.vu.State().Samples, metrics.Sample{
-		TimeSeries: metrics.TimeSeries{
-			Metric: m.metrics.RequestDuration,
-			Tags:   tags,
-		},
-		Time:  time.Now(),
-		Value: float64(duration) / float64(time.Millisecond),
-	})
-
-	metrics.PushIfNotDone(m.MCP.getContext(), m.vu.State().Samples, metrics.Sample{
-		TimeSeries: metrics.TimeSeries{
-			Metric: m.metrics.RequestCount,
-			Tags:   tags,
-		},
-		Time:  time.Now(),
-		Value: 1,
-	})
-
-	if err != nil {
-		metrics.PushIfNotDone(m.MCP.getContext(), m.vu.State().Samples, metrics.Sample{
-			TimeSeries: metrics.TimeSeries{
-				Metric: m.metrics.RequestErrors,
-				Tags:   tags,
-			},
-			Time:  time.Now(),
-			Value: 1,
-		})
-	}
 }
