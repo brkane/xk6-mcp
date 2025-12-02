@@ -158,9 +158,16 @@ func (m *MCPInstance) newStdioClient(c sobek.ConstructorCall, rt *sobek.Runtime)
 		common.Throw(rt, fmt.Errorf("failed to extract Client: %w", err))
 	}
 
+	mcpMetrics := metrics.NewK6Metrics(
+		m.registry,
+		m.vu.State().Samples,
+		m.vu.State().Tags.GetCurrentValues(),
+	)
+
 	return rt.ToValue(&Client{
 		ctx:     m.vu.Context(),
 		session: client.session,
+		metrics: mcpMetrics,
 	}).ToObject(rt)
 }
 
@@ -180,9 +187,16 @@ func (m *MCP) getTracer() trace.Tracer {
 		common.Throw(rt, fmt.Errorf("failed to extract Client: %w", err))
 	}
 
+	mcpMetrics := metrics.NewK6Metrics(
+		m.registry,
+		m.vu.State().Samples,
+		m.vu.State().Tags.GetCurrentValues(),
+	)
+
 	return rt.ToValue(&Client{
 		ctx:     m.vu.Context(),
 		session: client.session,
+		metrics: mcpMetrics,
 	}).ToObject(rt)
 }
 
