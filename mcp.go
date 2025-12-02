@@ -53,6 +53,15 @@ type (
 	}
 )
 
+const (
+	ListToolsMethod     = "tools/list"
+	CallToolMethod      = "tools/call"
+	ListResourcesMethod = "resources/list"
+	ReadResourceMethod  = "resources/read"
+	ListPromptsMethod   = "prompts/list"
+	GetPromptMethod     = "prompts/get"
+)
+
 // New returns a pointer to a new RootModule instance.
 func New() *RootModule {
 	return &RootModule{}
@@ -256,7 +265,10 @@ func (c *Client) Ping() bool {
 }
 
 func (c *Client) ListTools(r mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
-	return c.session.ListTools(context.Background(), &r)
+	start := time.Now()
+	result, err := c.session.ListTools(context.Background(), &r)
+	c.metrics.Push(c.ctx, ListToolsMethod, time.Since(start), err)
+	return result, err
 }
 
 type ListAllToolsParams struct {
@@ -312,35 +324,35 @@ func (c *Client) ListAllTools(r ListAllToolsParams) (*ListAllToolsResult, error)
 func (c *Client) CallTool(r mcp.CallToolParams) (*mcp.CallToolResult, error) {
 	start := time.Now()
 	result, err := c.session.CallTool(c.ctx, &r)
-	c.metrics.Push(c.ctx, "CallTool", time.Since(start), err)
+	c.metrics.Push(c.ctx, CallToolMethod, time.Since(start), err)
 	return result, err
 }
 
 func (c *Client) ListResources(r mcp.ListResourcesParams) (*mcp.ListResourcesResult, error) {
 	start := time.Now()
 	res, err := c.session.ListResources(context.Background(), &r)
-	c.metrics.Push(c.ctx, "ListResources", time.Since(start), err)
+	c.metrics.Push(c.ctx, ListResourcesMethod, time.Since(start), err)
 	return res, err
 }
 
 func (c *Client) ReadResource(r mcp.ReadResourceParams) (*mcp.ReadResourceResult, error) {
 	start := time.Now()
 	res, err := c.session.ReadResource(context.Background(), &r)
-	c.metrics.Push(c.ctx, "ReadResource", time.Since(start), err)
+	c.metrics.Push(c.ctx, ReadResourceMethod, time.Since(start), err)
 	return res, err
 }
 
 func (c *Client) ListPrompts(r mcp.ListPromptsParams) (*mcp.ListPromptsResult, error) {
 	start := time.Now()
 	res, err := c.session.ListPrompts(context.Background(), &r)
-	c.metrics.Push(c.ctx, "ListPrompts", time.Since(start), err)
+	c.metrics.Push(c.ctx, ListPromptsMethod, time.Since(start), err)
 	return res, err
 }
 
 func (c *Client) GetPrompt(r mcp.GetPromptParams) (*mcp.GetPromptResult, error) {
 	start := time.Now()
 	res, err := c.session.GetPrompt(context.Background(), &r)
-	c.metrics.Push(c.ctx, "GetPrompt", time.Since(start), err)
+	c.metrics.Push(c.ctx, GetPromptMethod, time.Since(start), err)
 	return res, err
 }
 
