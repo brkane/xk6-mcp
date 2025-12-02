@@ -9,27 +9,30 @@ import (
 
 type (
 	K6Metrics struct {
-		samples         chan<- k6metrics.SampleContainer
-		tagsAndMeta     k6metrics.TagsAndMeta
-		requestDuration *k6metrics.Metric
-		requestCount    *k6metrics.Metric
-		requestErrors   *k6metrics.Metric
+		samples               chan<- k6metrics.SampleContainer
+		tagsAndMeta           k6metrics.TagsAndMeta
+		requestDuration       *k6metrics.Metric
+		requestCount          *k6metrics.Metric
+		requestErrors         *k6metrics.Metric
+		requestErrorsDuration *k6metrics.Metric
 	}
 )
 
 const (
-	requestDurationName = "mcp_request_duration"
-	requestCountName    = "mcp_request_count"
-	requestErrorsName   = "mcp_request_errors"
+	requestDurationName       = "mcp_request_duration"
+	requestCountName          = "mcp_request_count"
+	requestErrorsName         = "mcp_request_errors"
+	requestErrorsDurationName = "mcp_request_errors_duration"
 )
 
 func NewK6Metrics(registry *k6metrics.Registry, samples chan<- k6metrics.SampleContainer, tagsAndMeta k6metrics.TagsAndMeta) *K6Metrics {
 	return &K6Metrics{
-		samples:         samples,
-		tagsAndMeta:     tagsAndMeta,
-		requestDuration: registry.MustNewMetric(requestDurationName, k6metrics.Trend, k6metrics.Time),
-		requestCount:    registry.MustNewMetric(requestCountName, k6metrics.Counter),
-		requestErrors:   registry.MustNewMetric(requestErrorsName, k6metrics.Counter),
+		samples:               samples,
+		tagsAndMeta:           tagsAndMeta,
+		requestDuration:       registry.MustNewMetric(requestDurationName, k6metrics.Trend, k6metrics.Time),
+		requestCount:          registry.MustNewMetric(requestCountName, k6metrics.Counter),
+		requestErrors:         registry.MustNewMetric(requestErrorsName, k6metrics.Counter),
+		requestErrorsDuration: registry.MustNewMetric(requestErrorsDurationName, k6metrics.Trend, k6metrics.Time),
 	}
 }
 
@@ -56,6 +59,15 @@ func (k *K6Metrics) Push(ctx context.Context, method string, duration time.Durat
 	})
 
 	if err != nil {
+		k6metrics.PushIfNotDone(ctx, k.samples, k6metrics.Sample{
+			TimeSeries: k6metrics.TimeSeries{
+				Metric: k.requestErrorsDuration,
+				Tags:   tags,
+			},
+			Time:  time.Now(),
+			Value: float64(duration) / float64(time.Millisecond),
+		})
+
 		k6metrics.PushIfNotDone(ctx, k.samples, k6metrics.Sample{
 			TimeSeries: k6metrics.TimeSeries{
 				Metric: k.requestErrors,

@@ -135,5 +135,5 @@ func TestK6ErrorMetrics(t *testing.T) {
 	for _, sampleContainer := range sampleContainers {
 		sampleCount += len(sampleContainer.GetSamples())
 	}
-	assert.Equal(t, sampleCount, 3)
+	assert.Equal(t, sampleCount, 4)
 }
