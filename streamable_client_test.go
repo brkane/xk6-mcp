@@ -1,9 +1,12 @@
 package mcp_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,6 +24,13 @@ import (
 type (
 	testCase struct {
 		runtime *modulestest.Runtime
+	}
+
+	jsonRPCRequest struct {
+		JSONRPC string      `json:"jsonrpc"`
+		Method  string      `json:"method"`
+		Id      int         `json:"id"`
+		Params  interface{} `json:"params"`
 	}
 
 	MyToolInput struct {
@@ -79,6 +89,24 @@ func streamableHandler(t *testing.T) (*mcpsdk.StreamableHTTPHandler, error) {
 	), nil
 }
 
+func parseJSONRPCBody(r *http.Request) (jsonRPCRequest, error) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return jsonRPCRequest{}, err
+	}
+	r.Body = io.NopCloser(bytes.NewBuffer(body))
+
+	var jsonReq jsonRPCRequest
+	err = json.Unmarshal(body, &jsonReq)
+	if err != nil {
+		if err != io.EOF {
+			return jsonRPCRequest{}, err
+		}
+	}
+
+	return jsonReq, nil
+}
+
 func TestInit(t *testing.T) {
 	rt := modulestest.NewRuntime(t)
 
@@ -121,4 +149,41 @@ func TestStreamableBearerAuth(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Equal(t, jwtToken, observedToken)
+}
+
+func TestListTools(t *testing.T) {
+	var listToolsCalled bool
+	handler, err := streamableHandler(t)
+	require.NoError(t, err)
+
+	handlerFunc := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			jsonReq, err := parseJSONRPCBody(r)
+			if err != nil {
+				if err != io.EOF {
+					require.NoError(t, err)
+				}
+			}
+
+			if jsonReq.Method == "tools/list" {
+				listToolsCalled = true
+			}
+		}
+		handler.ServeHTTP(w, r)
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(handlerFunc))
+	defer ts.Close()
+
+	tc := setupTest(t)
+
+	_, err = tc.runtime.VU.Runtime().RunString(
+		fmt.Sprintf(`const client = mcp.StreamableHTTPClient({
+      base_url: "%s"
+    });
+    const tools = client.listTools();`, ts.URL),
+	)
+
+	assert.NoError(t, err)
+	assert.True(t, listToolsCalled)
 }
