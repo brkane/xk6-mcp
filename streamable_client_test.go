@@ -239,3 +239,56 @@ func TestCallTool(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, callToolCalled)
 }
+
+func TestStatelessEnabled(t *testing.T) {
+	var standaloneSSEopened bool
+	handler, err := streamableHandler(t)
+	handlerFunc := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			standaloneSSEopened = true
+		}
+		handler.ServeHTTP(w, r)
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(handlerFunc))
+	defer ts.Close()
+
+	tc := setupTest(t)
+
+	_, err = tc.runtime.VU.Runtime().RunString(
+		fmt.Sprintf(`const client = mcp.StreamableHTTPClient({
+      base_url: "%s",
+      stateless: true
+    });
+    const tools = client.callTool({name: "%s", arguments: {id: 1}});`, ts.URL, toolName),
+	)
+
+	assert.NoError(t, err)
+	assert.False(t, standaloneSSEopened)
+}
+
+func TestStatelessDisabled(t *testing.T) {
+	var standaloneSSEopened bool
+	handler, err := streamableHandler(t)
+	handlerFunc := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			standaloneSSEopened = true
+		}
+		handler.ServeHTTP(w, r)
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(handlerFunc))
+	defer ts.Close()
+
+	tc := setupTest(t)
+
+	_, err = tc.runtime.VU.Runtime().RunString(
+		fmt.Sprintf(`const client = mcp.StreamableHTTPClient({
+      base_url: "%s"
+    });
+    const tools = client.callTool({name: "%s", arguments: {id: 1}});`, ts.URL, toolName),
+	)
+
+	assert.NoError(t, err)
+	assert.True(t, standaloneSSEopened)
+}

@@ -43,8 +43,9 @@ type (
 		Debug bool
 
 		// SSE and Streamable HTTP
-		BaseURL string
-		Auth    AuthConfig
+		BaseURL   string
+		Auth      AuthConfig
+		Stateless bool
 	}
 
 	AuthConfig struct {
@@ -180,7 +181,7 @@ func (m *MCPInstance) newStreamableHTTPClient(c sobek.ConstructorCall, rt *sobek
 		HTTPClient: m.newk6HTTPClient(cfg),
 	}
 
-	clientObj := m.connect(rt, transport, false)
+	clientObj := m.connect(rt, transport, cfg.Stateless)
 	var client *Client
 	if err := rt.ExportTo(clientObj, &client); err != nil {
 		common.Throw(rt, fmt.Errorf("failed to extract Client: %w", err))
@@ -231,10 +232,10 @@ func (m *MCPInstance) newk6HTTPClient(cfg ClientConfig) *http.Client {
 	return httpClient
 }
 
-func (m *MCPInstance) connect(rt *sobek.Runtime, transport mcp.Transport, isSSE bool) *sobek.Object {
+func (m *MCPInstance) connect(rt *sobek.Runtime, transport mcp.Transport, isStateless bool) *sobek.Object {
 	var ctx context.Context
 	var cancel context.CancelFunc
-	if isSSE {
+	if isStateless {
 		ctx = m.getContext()
 		cancel = func() {}
 	} else {
@@ -242,7 +243,9 @@ func (m *MCPInstance) connect(rt *sobek.Runtime, transport mcp.Transport, isSSE 
 	}
 	defer cancel()
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "k6", Version: "1.0.0"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "k6", Version: "1.0.0"}, &mcp.ClientOptions{
+		Stateless: isStateless,
+	})
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		common.Throw(rt, fmt.Errorf("connection error: %w", err))
